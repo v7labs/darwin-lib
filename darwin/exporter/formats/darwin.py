@@ -60,6 +60,8 @@ def _build_v2_annotation_data(annotation: dt.Annotation) -> Dict[str, Any]:
         polygon_data = _build_polygon_data(annotation.data)
         annotation_data["polygon"] = polygon_data
         annotation_data["bounding_box"] = _build_bounding_box_data(annotation.data)
+    elif annotation.annotation_class.annotation_type == "keypoint":
+        annotation_data["keypoint"] = annotation.data
 
     return annotation_data
 
