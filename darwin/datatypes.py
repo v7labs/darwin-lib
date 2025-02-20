@@ -23,7 +23,7 @@ try:
     from numpy.typing import NDArray
 except ImportError:
     NDArray = Any  # type:ignore
-
+import numpy as np
 from darwin.future.data_objects.properties import (
     PropertyType,
     SelectedProperty,
@@ -243,6 +243,116 @@ class Annotation:
             if sub.annotation_type == annotation_type:
                 return sub
         return None
+
+    def _flip_annotation_in_x_or_y(self, axis_limit: int, axis: CartesianAxis):
+        """
+        Flips a coordinate-based annotation in either X or Y axis.
+
+        Parameters
+        ----------
+        axis_limit : int
+            The limit of the axis to flip along.
+        """
+        annotation_type = (
+            self.annotation_class.annotation_type
+            if hasattr(self, "annotation_class")
+            else None
+        )
+        if annotation_type == "bounding_box":
+            if axis == CartesianAxis.X:
+                self.data["x"] = axis_limit - self.data["x"]
+            elif axis == CartesianAxis.Y:
+                self.data["y"] = axis_limit - self.data["y"]
+
+        elif annotation_type == "polygon":
+            if axis == CartesianAxis.X:
+                for path in self.data["paths"]:
+                    for point in path:
+                        point["x"] = axis_limit - point["x"]
+
+            elif axis == CartesianAxis.Y:
+                for path in self.data["paths"]:
+                    for point in path:
+                        point["y"] = axis_limit - point["y"]
+
+        elif annotation_type == "ellipse":
+            if axis == CartesianAxis.X:
+                self.data["center"]["x"] = axis_limit - self.data["center"]["x"]
+            elif axis == CartesianAxis.Y:
+                self.data["center"]["y"] = axis_limit - self.data["center"]["y"]
+
+        elif annotation_type == "line":
+            if axis == CartesianAxis.X:
+                for point in self.data["path"]:
+                    point["x"] = axis_limit - point["x"]
+            elif axis == CartesianAxis.Y:
+                for point in self.data["path"]:
+                    point["y"] = axis_limit - point["y"]
+
+        elif annotation_type == "keypoint":
+            if axis == CartesianAxis.X:
+                self.data["x"] = axis_limit - self.data["x"]
+            elif axis == CartesianAxis.Y:
+                self.data["y"] = axis_limit - self.data["y"]
+
+        elif annotation_type == "skeleton":
+            if axis == CartesianAxis.X:
+                for node in self.data["nodes"]:
+                    node["x"] = axis_limit - node["x"]
+            elif axis == CartesianAxis.Y:
+                for node in self.data["nodes"]:
+                    node["y"] = axis_limit - node["y"]
+
+    def _flip_raster_layer_in_x_or_y(
+        self, width: int, height: int, axis: CartesianAxis
+    ):
+        """
+        Flips a raster layer mask in either X or Y axis.
+
+        Parameters
+        ----------
+        width : int
+            Width of the image/mask
+        height : int
+            Height of the image/mask
+        axis : CartesianAxis
+            Axis to flip along (X or Y)
+
+        The method works by:
+        1. Decoding RLE to a 2D mask
+        2. Flipping the mask along the specified axis
+        3. Re-encoding back to RLE format
+        """
+        dense_rle = self.data["dense_rle"]
+        total_pixels = width * height
+        mask = np.zeros(total_pixels, dtype=np.uint8)
+        idx = 0
+        for i in range(0, len(dense_rle), 2):
+            value = dense_rle[i]
+            length = dense_rle[i + 1]
+            mask[idx : idx + length] = value
+            idx += length
+
+        mask = mask.reshape(height, width)
+        if axis == CartesianAxis.X:
+            mask = np.fliplr(mask)
+        elif axis == CartesianAxis.Y:
+            mask = np.flipud(mask)
+
+        mask = mask.ravel()
+        rle = []
+        count = 1
+        current = mask[0]
+
+        for bit in mask[1:]:
+            if bit == current:
+                count += 1
+            else:
+                rle.extend([int(current), count])
+                current = bit
+                count = 1
+        rle.extend([int(current), count])
+        self.data["dense_rle"] = rle
 
 
 @dataclass(frozen=False, eq=True)
@@ -1567,3 +1677,9 @@ class StorageKeyDictModel(BaseModel):
 
 class StorageKeyListModel(BaseModel):
     storage_keys: List[str]
+
+
+class CartesianAxis(Enum):
+    X = "x"
+    Y = "y"
+    Z = "z"

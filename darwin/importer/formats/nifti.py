@@ -3,7 +3,7 @@ import uuid
 import warnings
 from collections import OrderedDict, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, cast
 
 from rich.console import Console
 
@@ -13,6 +13,7 @@ console = Console()
 try:
     import cc3d
     import nibabel as nib
+    import numpy as np
     from scipy.ndimage import zoom
 except ImportError:
     import_fail_string = r"""
@@ -21,7 +22,7 @@ except ImportError:
     """
     console.print(import_fail_string)
     sys.exit(1)
-import numpy as np
+
 from jsonschema import validate
 from upolygon import find_contours
 
@@ -31,8 +32,7 @@ from darwin.importer.formats.nifti_schemas import nifti_import_schema
 
 def parse_path(
     path: Path,
-    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
-    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]] = {},
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]] = {},
 ) -> Optional[List[dt.AnnotationFile]]:
     """
     Parses the given ``nifti`` file and returns a ``List[dt.AnnotationFile]`` with the parsed
@@ -42,10 +42,23 @@ def parse_path(
     ----------
     path : Path
         The ``Path`` to the ``nifti`` file.
-    legacy_remote_file_slot_affine_maps : Optional[Dict[Path, Dict[str, Any]]]
-        A dictionary of remote file full paths to their slot affine maps
-    remote_file_pixdims : Optional[Dict[Path, Dict[str, Tuple[List[float], str]]]]
-        A dictionary of remote file full paths to their pixel dimensions and primary plane
+    remote_file_medical_metadata : Dict[Path, Dict[str, Any]]
+        A dictionary mapping file paths to their medical metadata:
+        {
+            remote_file_path: {
+                slot_name: {
+                    legacy: bool
+                    affine: ndarray,
+                    original_affine: ndarray,
+                    axial_flips: ndarray,
+                    pixdims: List[float],
+                    height: int,
+                    width: int,
+                    num_frames: int, # Only present for sequence files
+                    primary_plane: str
+                }
+            }
+        }
 
     Returns
     -------
@@ -91,8 +104,7 @@ def parse_path(
             slot_names=nifti_annotation.get("slot_names", []),
             is_mpr=nifti_annotation.get("is_mpr", False),
             remote_file_path=remote_file_path,
-            legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
-            pixdims_and_primary_planes=pixdims_and_primary_planes,
+            remote_file_medical_metadata=remote_file_medical_metadata,
         )
         annotation_files.append(annotation_file)
     return annotation_files
@@ -107,22 +119,29 @@ def _parse_nifti(
     slot_names: List[str],
     is_mpr: bool,
     remote_file_path: Path,
-    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
-    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]] = {},
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]] = {},
 ) -> dt.AnnotationFile:
-    img = process_nifti(
+    processed_nifti_img = process_nifti(
         nib.load(nifti_path),
         remote_file_path=remote_file_path,
-        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+        remote_file_medical_metadata=remote_file_medical_metadata,
     )
-    legacy = remote_file_path in legacy_remote_file_slot_affine_maps
+
+    if remote_file_path in remote_file_medical_metadata:
+        item_medical_metadata = remote_file_medical_metadata[remote_file_path]
+        legacy = any(
+            slot_metadata["legacy"] for slot_metadata in item_medical_metadata.values()
+        )
+    else:
+        legacy = False
     processed_class_map = process_class_map(class_map)
-    video_annotations = []
-    if mode == "instances":  # For each instance produce a video annotation
+    video_annotations: List[dt.VideoAnnotation] = []
+
+    if mode == "instances":  # For each instance produce a single video annotation
         for class_name, class_idxs in processed_class_map.items():
             if class_name == "background":
                 continue
-            class_img = np.isin(img, class_idxs).astype(np.uint8)
+            class_img = np.isin(processed_nifti_img, class_idxs).astype(np.uint8)
             cc_img, num_labels = cc3d.connected_components(class_img, return_N=True)
             for instance_id in range(1, num_labels):
                 _video_annotations = get_polygon_video_annotations(
@@ -131,7 +150,7 @@ def _parse_nifti(
                     class_name=class_name,
                     slot_names=slot_names,
                     is_mpr=is_mpr,
-                    pixdims_and_primary_planes=pixdims_and_primary_planes,
+                    remote_file_medical_metadata=remote_file_medical_metadata,
                     remote_file_path=remote_file_path,
                     legacy=legacy,
                 )
@@ -142,27 +161,29 @@ def _parse_nifti(
             if class_name == "background":
                 continue
             _video_annotations = get_polygon_video_annotations(
-                img,
+                processed_nifti_img,
                 class_idxs=class_idxs,
                 class_name=class_name,
                 slot_names=slot_names,
                 is_mpr=is_mpr,
-                pixdims_and_primary_planes=pixdims_and_primary_planes,
+                remote_file_medical_metadata=remote_file_medical_metadata,
                 remote_file_path=remote_file_path,
                 legacy=legacy,
             )
-            if _video_annotations is None:
-                continue
-            video_annotations += _video_annotations
+            if _video_annotations:
+                video_annotations += _video_annotations
     elif mode == "mask":
-        video_annotations = get_mask_video_annotations(
-            img,
+        mask_annotations = get_mask_video_annotations(
+            processed_nifti_img,
             processed_class_map,
             slot_names,
-            pixdims_and_primary_planes=pixdims_and_primary_planes,
+            remote_file_medical_metadata=remote_file_medical_metadata,
             remote_file_path=remote_file_path,
             isotropic=legacy,
         )
+        if mask_annotations:
+            video_annotations += mask_annotations
+
     if mode in ["video", "instances"]:
         annotation_classes = {
             dt.AnnotationClass(class_name, "polygon", "polygon")
@@ -180,7 +201,7 @@ def _parse_nifti(
         filename=str(filename),
         remote_path=str(remote_path),
         annotation_classes=annotation_classes,
-        annotations=video_annotations,
+        annotations=cast(List[dt.Annotation], video_annotations),
         slots=[
             dt.Slot(
                 name=slot_name,
@@ -198,22 +219,20 @@ def get_polygon_video_annotations(
     class_idxs: List[int],
     slot_names: List[str],
     is_mpr: bool,
-    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]],
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]],
     remote_file_path: Path,
     legacy: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
     if not is_mpr:
-        if remote_file_path in pixdims_and_primary_planes:
-            item_pixdims_and_primary_planes = pixdims_and_primary_planes[
-                remote_file_path
-            ]
+        if remote_file_path in remote_file_medical_metadata:
+            item_medical_metadata = remote_file_medical_metadata[remote_file_path]
             if slot_names:
                 slot_name = slot_names[0]
             else:
-                slot_name = list(item_pixdims_and_primary_planes.keys())[0]
-            slot_pixims_and_primary_plane = item_pixdims_and_primary_planes[slot_name]
-            primary_plane = slot_pixims_and_primary_plane[1]
-            pixdims = slot_pixims_and_primary_plane[0]
+                slot_name = list(item_medical_metadata.keys())[0]
+            slot_medical_metadata = item_medical_metadata[slot_name]
+            primary_plane = slot_medical_metadata["primary_plane"]
+            pixdims = slot_medical_metadata["pixdims"]
         else:
             pixdims = [1.0, 1.0, 1.0]
             primary_plane = "AXIAL"
@@ -236,7 +255,9 @@ def get_polygon_video_annotations(
     elif is_mpr and len(slot_names) == 3:
         video_annotations = []
         for view_idx, slot_name in enumerate(slot_names):
-            pixdims = pixdims_and_primary_planes[remote_file_path][slot_name][0]
+            pixdims = remote_file_medical_metadata[remote_file_path][slot_name][
+                "pixdims"
+            ]
             _video_annotations = nifti_to_video_polygon_annotation(
                 volume,
                 class_name,
@@ -256,7 +277,7 @@ def get_mask_video_annotations(
     volume: np.ndarray,
     processed_class_map: Dict,
     slot_names: List[str],
-    pixdims_and_primary_planes: Dict[Path, Dict[str, Tuple[List[float], str]]],
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]],
     remote_file_path: Path,
     isotropic: bool = False,
 ) -> Optional[List[dt.VideoAnnotation]]:
@@ -265,15 +286,15 @@ def get_mask_video_annotations(
 
     We write a single raster layer for the volume but K mask annotations, where K is the number of classes.
     """
-    if remote_file_path in pixdims_and_primary_planes:
-        item_pixdims_and_primary_planess = pixdims_and_primary_planes[remote_file_path]
+    if remote_file_path in remote_file_medical_metadata:
+        item_medical_metadata = remote_file_medical_metadata[remote_file_path]
         if slot_names:
             slot_name = slot_names[0]
         else:
-            slot_name = list(item_pixdims_and_primary_planess.keys())[0]
-        slot_pixdims_and_primary_planes = item_pixdims_and_primary_planess[slot_name]
-        primary_plane = slot_pixdims_and_primary_planes[1]
-        pixdims = slot_pixdims_and_primary_planes[0]
+            slot_name = list(item_medical_metadata.keys())[0]
+        slot_medical_metadata = item_medical_metadata[slot_name]
+        primary_plane = slot_medical_metadata["primary_plane"]
+        pixdims = slot_medical_metadata["pixdims"]
     else:
         pixdims = [1.0, 1.0, 1.0]
         primary_plane = "AXIAL"
@@ -580,8 +601,8 @@ def process_nifti(
     input_data: nib.nifti1.Nifti1Image,
     ornt: Optional[List[List[float]]] = [[0.0, -1.0], [1.0, -1.0], [2.0, -1.0]],
     remote_file_path: Path = Path("/"),
-    legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]] = {},
-) -> Tuple[np.ndarray, Tuple[float], str]:
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]] = {},
+) -> np.ndarray:
     """
     Converts a NifTI object of any orientation to the passed ornt orientation.
     The default ornt is LPI.
@@ -594,7 +615,7 @@ def process_nifti(
       their pixel data is stored in `LPI`, we can treat them the same way as non-legacy
       files.
     - Legacy DICOM files were not always re-oriented to `LPI`. We therefore use the
-      affine of the dataset item from `slot_affine_map` to re-orient the NifTI file to
+      affine of the dataset item from the medical metadata to re-orient the NifTI file to
       be imported
 
     Args:
@@ -604,25 +625,30 @@ def process_nifti(
             ornt[:,0] is the transpose that needs to be done to the implied array, as in arr.transpose(ornt[:,0]).
         remote_file_path: Path
             The full path of the remote file
-        legacy_remote_file_slot_affine_maps: Dict[Path, Dict[str, Any]]
-            A dictionary of remote file full paths to their slot affine maps
+        remote_file_medical_metadata: Dict[Path, Dict[str, Any]]
+            A dictionary mapping file paths to their medical metadata
 
     Returns:
-        data_array: pixel array with orientation ornt.
+        nib.nifti1.Nifti1Image
+        The reoriented NifTI object
     """
     img = correct_nifti_header_if_necessary(input_data)
     orig_ax_codes = nib.orientations.aff2axcodes(img.affine)
     orig_ornt = nib.orientations.axcodes2ornt(orig_ax_codes)
     is_dicom = remote_file_path.suffix.lower() == ".dcm"
-    if remote_file_path in legacy_remote_file_slot_affine_maps and is_dicom:
-        slot_affine_map = legacy_remote_file_slot_affine_maps[remote_file_path]
-        affine = slot_affine_map[next(iter(slot_affine_map))]  # Take the 1st slot
-        ax_codes = nib.orientations.aff2axcodes(affine)
-        ornt = nib.orientations.axcodes2ornt(ax_codes)
+
+    if remote_file_path in remote_file_medical_metadata and is_dicom:
+        file_metadata = remote_file_medical_metadata[remote_file_path]
+        if file_metadata["legacy"]:
+            first_slot = next(iter(file_metadata))
+            affine = file_metadata[first_slot]["affine"]
+            ax_codes = nib.orientations.aff2axcodes(affine)
+            ornt = nib.orientations.axcodes2ornt(ax_codes)
+
     transform = nib.orientations.ornt_transform(orig_ornt, ornt)
     reoriented_img = img.as_reoriented(transform)
-    data_array = reoriented_img.get_fdata()
-    return data_array
+    reoriented_img = reoriented_img.get_fdata()
+    return reoriented_img
 
 
 def convert_to_dense_rle(raster: np.ndarray) -> List[int]:
