@@ -99,18 +99,73 @@ def test_image_annotation_nifti_import_mpr(team_slug_darwin_json_v2: str):
             upload_json.write_text(
                 json.dumps(input_dict, indent=4, sort_keys=True, default=str)
             )
-            legacy_remote_file_slot_affine_maps = {}
-            pixdims_and_primary_planes = {
+            remote_file_medical_metadata = {
                 Path("/vol0 (1).nii"): {
-                    "0.3": ([1, 1, 1], "AXIAL"),
-                    "0.2": ([1, 1, 1], "CORONAL"),
-                    "0.1": ([1, 1, 1], "SAGITTAL"),
+                    "0.3": {
+                        "affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "original_affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "pixdims": [1, 1, 1],
+                        "primary_plane": "AXIAL",
+                        "height": 100,
+                        "width": 100,
+                        "num_frames": 10,
+                        "legacy": False,
+                    },
+                    "0.2": {
+                        "affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "original_affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "pixdims": [1, 1, 1],
+                        "primary_plane": "CORONAL",
+                        "height": 100,
+                        "width": 100,
+                        "num_frames": 10,
+                        "legacy": False,
+                    },
+                    "0.1": {
+                        "affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "original_affine": [
+                            [1, 0, 0, 0],
+                            [0, 1, 0, 0],
+                            [0, 0, 1, 0],
+                            [0, 0, 0, 1],
+                        ],
+                        "pixdims": [1, 1, 1],
+                        "primary_plane": "SAGITTAL",
+                        "height": 100,
+                        "width": 100,
+                        "num_frames": 10,
+                        "legacy": False,
+                    },
                 }
             }
             annotation_files = parse_path(
                 path=upload_json,
-                legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
-                pixdims_and_primary_planes=pixdims_and_primary_planes,
+                remote_file_medical_metadata=remote_file_medical_metadata,
             )
             annotation_file = annotation_files[0]
             output_json_string = json.loads(
@@ -200,22 +255,33 @@ def test_image_annotation_nifti_import_single_slot_to_mask_legacy(
 
             with patch("darwin.importer.formats.nifti.zoom") as mock_zoom:
                 mock_zoom.side_effect = ndimage.zoom
-
-                legacy_remote_file_slot_affine_maps = {
+                remote_file_medical_metadata = {
                     Path("/2044737.fat.nii"): {
-                        "0": np.array(
-                            [
+                        "0.1": {
+                            "affine": [
                                 [2.23214293, 0, 0, -247.76787233],
                                 [0, 2.23214293, 0, -191.96429443],
                                 [0, 0, 3, -21],
                                 [0, 0, 0, 1],
-                            ]
-                        )
+                            ],
+                            "original_affine": [
+                                [2.23214293, 0, 0, -247.76787233],
+                                [0, 2.23214293, 0, -191.96429443],
+                                [0, 0, 3, -21],
+                                [0, 0, 0, 1],
+                            ],
+                            "pixdims": [1, 1, 1],
+                            "primary_plane": "AXIAL",
+                            "height": 100,
+                            "width": 100,
+                            "num_frames": 10,
+                            "legacy": True,
+                        },
                     }
                 }
                 annotation_files = parse_path(
                     path=upload_json,
-                    legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+                    remote_file_medical_metadata=remote_file_medical_metadata,
                 )
                 annotation_file = annotation_files[0]
                 output_json_string = json.loads(
@@ -537,21 +603,33 @@ def test_parse_path_nifti_with_legacy_scaling():
     )
     adjust_nifti_label_filepath(nifti_annotation_filepath, nifti_filepath)
     expected_annotations = parse_darwin_json(expected_annotations_filepath)
-    legacy_remote_file_slot_affine_maps = {
+    remote_file_medical_metadata = {
         Path("/2044737.fat.nii.gz"): {
-            "0": np.array(
-                [
+            "0": {
+                "affine": [
                     [2.23214293, 0, 0, -247.76787233],
                     [0, 2.23214293, 0, -191.96429443],
                     [0, 0, 3, -21],
                     [0, 0, 0, 1],
-                ]
-            )
+                ],
+                "original_affine": [
+                    [2.23214293, 0, 0, -247.76787233],
+                    [0, 2.23214293, 0, -191.96429443],
+                    [0, 0, 3, -21],
+                    [0, 0, 0, 1],
+                ],
+                "pixdims": [1, 1, 1],
+                "primary_plane": "AXIAL",
+                "height": 100,
+                "width": 100,
+                "num_frames": 10,
+                "legacy": True,
+            },
         }
     }
     parsed_annotations = parse_path(
         nifti_annotation_filepath,
-        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
+        remote_file_medical_metadata=remote_file_medical_metadata,
     )
     for frame_idx in expected_annotations.annotations[0].frames:
         expected_annotation = (
@@ -583,18 +661,35 @@ def test_parse_path_nifti_without_legacy_scaling():
         / "no-legacy"
         / "BRAINIX_NIFTI_ROI.nii.json"
     )
-    legacy_remote_file_slot_affine_maps = {}
-    pixdims_and_primary_planes = {
+    remote_file_medical_metadata = {
         Path("/2044737.fat.nii.gz"): {
-            "0": ([0.7986109, 0.798611, 6.0000024], "AXIAL"),
+            "0": {
+                "affine": [
+                    [2.23214293, 0, 0, -247.76787233],
+                    [0, 2.23214293, 0, -191.96429443],
+                    [0, 0, 3, -21],
+                    [0, 0, 0, 1],
+                ],
+                "original_affine": [
+                    [2.23214293, 0, 0, -247.76787233],
+                    [0, 2.23214293, 0, -191.96429443],
+                    [0, 0, 3, -21],
+                    [0, 0, 0, 1],
+                ],
+                "pixdims": [0.7986109, 0.798611, 6.0000024],
+                "primary_plane": "AXIAL",
+                "height": 100,
+                "width": 100,
+                "num_frames": 10,
+                "legacy": False,
+            },
         }
     }
     adjust_nifti_label_filepath(nifti_annotation_filepath, nifti_filepath)
     expected_annotations = parse_darwin_json(expected_annotations_filepath)
     parsed_annotations = parse_path(
         nifti_annotation_filepath,
-        legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,
-        pixdims_and_primary_planes=pixdims_and_primary_planes,
+        remote_file_medical_metadata=remote_file_medical_metadata,
     )
     for frame_idx in expected_annotations.annotations[0].frames:
         expected_annotation = (

@@ -1,6 +1,5 @@
 import concurrent.futures
 import uuid
-import json
 import copy
 from collections import defaultdict
 from logging import getLogger
@@ -21,7 +20,9 @@ from typing import (
     Union,
 )
 
-
+import json
+import numpy as np
+import nibabel as nib
 from darwin.datatypes import (
     AnnotationFile,
     Property,
@@ -40,7 +41,6 @@ from darwin.path_utils import is_properties_enabled, parse_metadata
 from darwin.utils.utils import _parse_annotators
 
 Unknown = Any  # type: ignore
-import numpy as np
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -122,10 +122,7 @@ def _find_and_parse(  # noqa: C901
     console: Optional[Console] = None,
     use_multi_cpu: bool = True,
     cpu_limit: int = 1,
-    legacy_remote_file_slot_affine_maps: Optional[
-        Dict[str, Dict[Path, np.ndarray]]
-    ] = {},
-    pixdims_and_primary_planes: Optional[Dict[str, Dict[Path, np.ndarray]]] = {},
+    remote_file_medical_metadata: Optional[Dict[Path, Dict[str, Any]]] = {},
 ) -> Optional[Iterable[dt.AnnotationFile]]:
     is_console = console is not None
 
@@ -159,8 +156,7 @@ def _find_and_parse(  # noqa: C901
                     parsed_files = pool.map(
                         lambda file: importer(
                             file,
-                            legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,  # type: ignore
-                            pixdims_and_primary_planes=pixdims_and_primary_planes,  # type: ignore
+                            remote_file_medical_metadata=remote_file_medical_metadata,
                         ),
                         tqdm(files),
                     )
@@ -181,8 +177,7 @@ def _find_and_parse(  # noqa: C901
             parsed_files = [
                 importer(
                     file,
-                    legacy_remote_file_slot_affine_maps=legacy_remote_file_slot_affine_maps,  # type: ignore
-                    pixdims_and_primary_planes=pixdims_and_primary_planes,  # type: ignore
+                    remote_file_medical_metadata=remote_file_medical_metadata,
                 )
                 for file in tqdm(files)
             ]
@@ -1268,10 +1263,9 @@ def import_annotations(  # noqa: C901
     remote_files_targeted_by_import = _get_remote_files_targeted_by_import(
         importer, file_paths, dataset, console, use_multi_cpu, cpu_limit
     )
-    (
-        legacy_remote_file_slot_affine_maps,
-        pixdims_and_primary_planes,
-    ) = _get_remote_medical_file_transform_requirements(remote_files_targeted_by_import)
+    remote_file_medical_metadata = _get_remote_file_medical_metadata(
+        remote_files_targeted_by_import
+    )
 
     if importer.__module__ == "darwin.importer.formats.nifti":
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
@@ -1280,8 +1274,7 @@ def import_annotations(  # noqa: C901
             console,
             use_multi_cpu,
             cpu_limit,
-            legacy_remote_file_slot_affine_maps,
-            pixdims_and_primary_planes,
+            remote_file_medical_metadata,
         )
     else:
         maybe_parsed_files: Optional[Iterable[dt.AnnotationFile]] = _find_and_parse(
@@ -1296,6 +1289,9 @@ def import_annotations(  # noqa: C901
         raise ValueError("Not able to parse any files.")
 
     parsed_files: List[AnnotationFile] = flatten_list(list(maybe_parsed_files))
+    parsed_files = _apply_axial_flips_to_annotations(
+        parsed_files, remote_file_medical_metadata
+    )
 
     filenames: List[str] = [
         parsed_file.filename for parsed_file in parsed_files if parsed_file is not None
@@ -2423,63 +2419,100 @@ def _get_remote_files_targeted_by_import(
     ]
 
 
-def _get_remote_medical_file_transform_requirements(
+def _get_remote_file_medical_metadata(
     remote_files_targeted_by_import: List[DatasetItem],
-) -> Tuple[Dict[Path, Dict[str, Any]], Dict[Path, Dict[Path, Tuple[List[float], str]]]]:
+) -> Dict[Path, Dict[str, Any]]:
     """
-    This function parses the remote files targeted by the import. If the remote file is
-    a medical file, it checks if it requires legacy NifTI scaling or not.
-
-    If the file requires legacy NifTI scaling, the affine matrix of the slot is returned
-    in the legacy_remote_file_slot_affine_map dictionary.
-
-    If the file is medical, the pixdims and the primary plane are returned
-    in the pixdims_and_primary_planes dictionary.
+    This function parses the remote files targeted by the import and returns metadata
+    for medical files. For each medical file, it returns a dictionary containing:
+    - For each slot:
+        - legacy: Whether the slot requires legacy NifTI scaling
+        - affine: The affine matrix (if legacy)
+        - original_affine: The original affine matrix (if legacy)
+        - axial_flips: A list of 3 values that are either 1 or -1. -1 indicates the axis is reversed.
+        - pixdims: The (x, y, z) pixel dimensions
+        - height: The height of the file
+        - width: The width of the file
+        - num_frames: The number of frames in the file (only present for sequence files)
+        - primary_plane: The primary plane of the medical image
 
     Parameters
     ----------
     remote_files_targeted_by_import: List[DatasetItem]
         The remote files targeted by the import
+
     Returns
     -------
-    Tuple[Dict[Path, Dict[str, Any]], Dict[Path, Dict[str, Tuple[List[float], str]]]]
-        A tuple of 2 dictionaries:
-        - legacy_remote_file_slot_affine_map: A dictionary of remote files
-        that require legacy NifTI scaling and the slot name to affine matrix mapping
-        - pixdims_and_primary_planes: A dictionary of remote files
-        containing the (x, y, z) pixdims and the primary plane
+    Dict[Path, Dict[str, Any]]
+        A dictionary mapping file paths to their medical metadata:
+        {
+            remote_file_path: {
+                slot_name: {
+                    legacy: bool,
+                    affine: ndarray,
+                    original_affine: ndarray,
+                    axial_flips: ndarray,
+                    pixdims: List[float],
+                    height: int,
+                    width: int,
+                    num_frames: int, (Only present for sequence files)
+                    primary_plane: str,
+                }
+            }
+        }
     """
-    legacy_remote_file_slot_affine_map = {}
-    pixdims_and_primary_planes = {}
+    remote_file_medical_metadata = {}
     for remote_file in remote_files_targeted_by_import:
         if not remote_file.slots:
             continue
-        slot_pixdim_primary_plane_map = {}
-        slot_affine_map = {}
+
+        file_metadata = {}
         for slot in remote_file.slots:
             if not slot_is_medical(slot):
                 continue
-            slot_name = slot["slot_name"]
-            primary_plane = slot["metadata"]["medical"]["plane_map"][slot_name]
-            pixdims = [float(dim) for dim in slot["metadata"]["medical"]["pixdims"]]
-            slot_pixdim_primary_plane_map[slot_name] = (pixdims, primary_plane)
-            if not slot_is_handled_by_monai(slot):
-                slot_affine_map[slot["slot_name"]] = np.array(
-                    slot["metadata"]["medical"]["affine"], dtype=np.float64
-                )
-        if slot_pixdim_primary_plane_map:
-            pixdims_and_primary_planes[Path(remote_file.full_path)] = (
-                slot_pixdim_primary_plane_map
-            )
-        if slot_affine_map:
-            legacy_remote_file_slot_affine_map[Path(remote_file.full_path)] = (
-                slot_affine_map
-            )
 
-    return (
-        legacy_remote_file_slot_affine_map,
-        pixdims_and_primary_planes,
-    )
+            slot_name = slot["slot_name"]
+            legacy = not slot_is_handled_by_monai(slot)
+            affine_str = slot["metadata"]["medical"]["affine"]
+            original_affine_str = slot["metadata"]["medical"]["original_affine"]
+            affine = np.array(affine_str).astype(float)
+            original_affine = np.array(original_affine_str).astype(float)
+            pixdims = slot["metadata"]["medical"]["pixdims"]
+            width = slot["metadata"]["width"]
+            height = slot["metadata"]["height"]
+            slot_metadata = {
+                "legacy": legacy,
+                "affine": affine,
+                "original_affine": original_affine,
+                "pixdims": pixdims,
+                "width": width,
+                "height": height,
+            }
+            num_frames = slot.get("total_sections", None)
+            if num_frames:
+                slot_metadata["num_frames"] = num_frames
+
+            if legacy:
+                axial_flips = [1, 1, 1]
+                primary_plane = "AXIAL"
+            else:
+                ax_codes = nib.orientations.aff2axcodes(affine)
+                original_ax_codes = nib.orientations.aff2axcodes(original_affine)
+                ornt = nib.orientations.axcodes2ornt(ax_codes)
+                original_ornt = nib.orientations.axcodes2ornt(original_ax_codes)
+                axial_flips = nib.orientations.ornt_transform(original_ornt, ornt)[:, 1]
+                primary_plane = slot["metadata"]["medical"]["plane_map"][slot_name]
+
+            slot_metadata.update(
+                {"axial_flips": axial_flips, "primary_plane": primary_plane}
+            )
+            file_metadata[slot_name] = slot_metadata
+
+        if file_metadata:
+            file_path = Path(remote_file.full_path)
+            remote_file_medical_metadata[file_path] = file_metadata
+
+    return remote_file_medical_metadata
 
 
 def slot_is_medical(slot: Dict[str, Any]) -> bool:
@@ -2488,3 +2521,108 @@ def slot_is_medical(slot: Dict[str, Any]) -> bool:
 
 def slot_is_handled_by_monai(slot: Dict[str, Any]) -> bool:
     return slot.get("metadata", {}).get("medical", {}).get("handler") == "MONAI"
+
+
+def _apply_axial_flips_to_annotations(
+    parsed_files: List[dt.AnnotationFile],
+    remote_file_medical_metadata: Dict[Path, Dict[str, Any]],
+) -> List[dt.AnnotationFile]:
+    for parsed_file in parsed_files:
+        remote_file_path = Path(parsed_file.full_path)
+
+        if remote_file_path in remote_file_medical_metadata:
+            medical_metadata = remote_file_medical_metadata[remote_file_path]
+
+            for annotation in parsed_file.annotations:
+                annotation_slot_name = annotation.slot_names[0]
+                if annotation_slot_name not in medical_metadata:
+                    continue
+
+                slot_metadata = medical_metadata[annotation_slot_name]
+                if slot_metadata["legacy"]:
+                    continue
+
+                axial_flips = slot_metadata["axial_flips"]
+                if isinstance(annotation, dt.VideoAnnotation):
+
+                    flipped_frames = {}
+                    for frame_idx, frame_annotation in annotation.frames.items():
+                        flipped_frames[frame_idx] = copy.deepcopy(frame_annotation)
+
+                    if axial_flips[0] == -1:
+                        for frame_idx, frame_annotation in flipped_frames.items():
+                            if (
+                                frame_annotation.annotation_class.annotation_type
+                                == "raster_layer"
+                            ):
+                                frame_annotation._flip_raster_layer_in_x_or_y(
+                                    width=slot_metadata["width"],
+                                    height=slot_metadata["height"],
+                                    axis=dt.CartesianAxis.X,
+                                )
+                            else:
+                                frame_annotation._flip_annotation_in_x_or_y(
+                                    axis_limit=slot_metadata["width"],
+                                    axis=dt.CartesianAxis.X,
+                                )
+
+                    annotation.frames = flipped_frames
+                    if axial_flips[1] == -1:
+                        for frame_idx, frame_annotation in flipped_frames.items():
+                            if (
+                                frame_annotation.annotation_class.annotation_type
+                                == "raster_layer"
+                            ):
+                                frame_annotation._flip_raster_layer_in_x_or_y(
+                                    width=slot_metadata["width"],
+                                    height=slot_metadata["height"],
+                                    axis=dt.CartesianAxis.Y,
+                                )
+                            else:
+                                frame_annotation._flip_annotation_in_x_or_y(
+                                    axis_limit=slot_metadata["height"],
+                                    axis=dt.CartesianAxis.Y,
+                                )
+
+                    annotation.frames = flipped_frames
+                    if axial_flips[2] == -1:
+                        if isinstance(annotation, dt.VideoAnnotation):
+                            annotation = _flip_annotation_in_z(
+                                annotation=annotation,
+                                num_frames=slot_metadata["num_frames"],
+                            )
+                else:
+                    if axial_flips[0] == -1:
+                        annotation._flip_annotation_in_x_or_y(
+                            axis_limit=slot_metadata["width"],
+                            axis=dt.CartesianAxis.X,
+                        )
+                    if axial_flips[1] == -1:
+                        annotation._flip_annotation_in_x_or_y(
+                            axis_limit=slot_metadata["height"],
+                            axis=dt.CartesianAxis.Y,
+                        )
+
+    return parsed_files
+
+
+def _flip_annotation_in_z(
+    annotation: dt.VideoAnnotation,
+    num_frames: int,
+) -> dt.VideoAnnotation:
+    flipped_frames, flipped_keyframes = {}, {}
+    for frame_idx, frame_annotation in annotation.frames.items():
+        flipped_frame_idx = num_frames - frame_idx - 1
+        flipped_frames[flipped_frame_idx] = frame_annotation
+    for frame_idx in annotation.keyframes:
+        flipped_frame_idx = num_frames - frame_idx - 1
+        flipped_keyframes[flipped_frame_idx] = annotation.keyframes[frame_idx]
+    segment_start = annotation.segments[0][0]
+    segment_end = annotation.segments[0][1]
+    flipped_segments = [[num_frames - segment_end, num_frames - segment_start]]
+    annotation.frames = flipped_frames
+    annotation.keyframes = flipped_keyframes
+    annotation.segments = flipped_segments
+    # NOTE: We haven't implemented flipping for `hidden_areas` because hidden areas
+    # are not supported in slots containing medical data
+    return annotation

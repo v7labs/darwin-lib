@@ -36,7 +36,7 @@ from darwin.importer.importer import (
     _serialize_item_level_properties,
     _split_payloads,
     _get_remote_files_targeted_by_import,
-    _get_remote_medical_file_transform_requirements,
+    _get_remote_file_medical_metadata,
     slot_is_medical,
     slot_is_handled_by_monai,
     MAX_URL_LENGTH,
@@ -1575,12 +1575,10 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
                 ),
-                ({}, {}),
             ]
             mock_create_update_props.side_effect = _create_update_item_properties
 
@@ -1936,7 +1934,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -1968,7 +1965,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -2146,7 +2142,6 @@ class TestImportItemLevelProperties:
                             property_values=[
                                 PropertyValue(type="string", value="1"),
                                 PropertyValue(type="string", value="2"),
-                                PropertyValue(type="string", value="3"),
                             ],
                         ),
                     },
@@ -3840,204 +3835,221 @@ def test__get_remote_files_targeted_by_import_url_too_long() -> None:
     )
 
 
-def test__get_remote_medical_file_transform_requirements_empty_list():
-    """Test that empty input list returns empty dictionaries"""
+def test__get_remote_file_medical_metadata_empty_list():
+    """Test that empty input list returns empty dictionary"""
     remote_files: List[DatasetItem] = []
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {}
+    metadata = _get_remote_file_medical_metadata(remote_files)
+    assert metadata == {}
 
 
-def test__get_remote_medical_file_transform_requirements_no_slots():
+def test__get_remote_file_medical_metadata_no_slots():
     """Test that files with no slots are handled correctly"""
     mock_file = MagicMock(spec=DatasetItem)
     mock_file.slots = None
     mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {}
+    metadata = _get_remote_file_medical_metadata([mock_file])
+    assert metadata == {}
 
 
-def test__get_remote_medical_file_transform_requirements_non_medical_slots():
+def test__get_remote_file_medical_metadata_non_medical_slots():
     """Test that files with non-medical slots are handled correctly"""
-    mock_file = MagicMock(spec=DatasetItem)
-    mock_file.slots = [{"slot_name": "slot1", "metadata": {}}]
-    mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {}
+    mock_file = create_mock_file("slot1")
+    metadata = _get_remote_file_medical_metadata([mock_file])
+    assert metadata == {}
 
 
-def test__get_remote_medical_file_transform_requirements_monai_axial():
-    """Test MONAI-handled medical slots with AXIAL plane"""
-    mock_file = MagicMock(spec=DatasetItem)
-    mock_file.slots = [
-        {
-            "slot_name": "slot1",
-            "metadata": {
-                "medical": {
-                    "handler": "MONAI",
-                    "plane_map": {"slot1": "AXIAL"},
-                    "pixdims": [1.0, 2.0, 3.0],
-                }
-            },
-        }
+def test__get_remote_file_medical_metadata_monai_planes(base_medical_metadata):
+    """Test MONAI-handled medical slots with different planes"""
+    test_cases = [
+        ("AXIAL", [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
+        ("CORONAL", [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
+        ("SAGITTAL", [[0, 0, 1, 0], [1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1]]),
     ]
-    mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {
-        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")}
-    }
 
+    for plane, original_affine in test_cases:
+        medical_metadata = {**base_medical_metadata}
+        medical_metadata.update(
+            {
+                "handler": "MONAI",
+                "plane_map": {"slot1": plane},
+                "original_affine": original_affine,
+            }
+        )
 
-def test__get_remote_medical_file_transform_requirements_monai_coronal():
-    """Test MONAI-handled medical slots with CORONAL plane"""
-    mock_file = MagicMock(spec=DatasetItem)
-    mock_file.slots = [
-        {
-            "slot_name": "slot1",
-            "metadata": {
-                "medical": {
-                    "handler": "MONAI",
-                    "plane_map": {"slot1": "CORONAL"},
+        mock_file = create_mock_file("slot1", medical_metadata)
+        metadata = _get_remote_file_medical_metadata([mock_file])
+
+        expected_metadata = {
+            Path("/path/to/file"): {
+                "slot1": {
+                    "legacy": False,
+                    "affine": np.array(
+                        base_medical_metadata["affine"], dtype=np.float64
+                    ),
+                    "original_affine": np.array(original_affine, dtype=np.float64),
                     "pixdims": [1.0, 2.0, 3.0],
+                    "width": 100,
+                    "height": 100,
+                    "primary_plane": plane,
+                    "num_frames": 10,
+                    "axial_flips": np.array([1, 1, 1]),
                 }
-            },
+            }
         }
-    ]
-    mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {
-        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "CORONAL")}
-    }
+
+        assert_metadata_matches(metadata, expected_metadata, "/path/to/file", "slot1")
 
 
-def test__get_remote_medical_file_transform_requirements_monai_sagittal():
-    """Test MONAI-handled medical slots with SAGGITAL plane"""
-    mock_file = MagicMock(spec=DatasetItem)
-    mock_file.slots = [
-        {
-            "slot_name": "slot1",
-            "metadata": {
-                "medical": {
-                    "handler": "MONAI",
-                    "plane_map": {"slot1": "SAGITTAL"},
-                    "pixdims": [1.0, 2.0, 3.0],
-                }
-            },
-        }
-    ]
-    mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
-    )
-    assert legacy_scaling == {}
-    assert pixdims_and_primary_planes == {
-        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "SAGITTAL")}
-    }
-
-
-def test__get_remote_medical_file_transform_requirements_legacy_nifti():
+def test__get_remote_file_medical_metadata_legacy_nifti(base_medical_metadata):
     """Test legacy NifTI scaling"""
-    mock_file = MagicMock(spec=DatasetItem)
-    mock_file.slots = [
+    medical_metadata = {**base_medical_metadata}
+    medical_metadata.update(
         {
-            "slot_name": "slot1",
-            "metadata": {
-                "medical": {
-                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-                    "plane_map": {"slot1": "AXIAL"},
-                    "pixdims": [1.0, 2.0, 3.0],
-                }
-            },
+            "plane_map": {"slot1": "AXIAL"},
         }
-    ]
-    mock_file.full_path = "/path/to/file"
-    remote_files: List[DatasetItem] = [mock_file]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
     )
-    assert pixdims_and_primary_planes == {
-        Path("/path/to/file"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")}
+
+    mock_file = create_mock_file("slot1", medical_metadata)
+    metadata = _get_remote_file_medical_metadata([mock_file])
+
+    expected_metadata = {
+        Path("/path/to/file"): {
+            "slot1": {
+                "legacy": True,
+                "affine": np.array(base_medical_metadata["affine"], dtype=np.float64),
+                "original_affine": np.array(
+                    base_medical_metadata["original_affine"], dtype=np.float64
+                ),
+                "pixdims": [1.0, 2.0, 3.0],
+                "width": 100,
+                "height": 100,
+                "primary_plane": "AXIAL",
+                "num_frames": 10,
+                "axial_flips": np.array([1, 1, 1]),
+            }
+        }
     }
-    assert Path("/path/to/file") in legacy_scaling
-    assert "slot1" in legacy_scaling[Path("/path/to/file")]
-    assert legacy_scaling[Path("/path/to/file")]["slot1"].shape == (4, 4)
-    assert (
-        legacy_scaling[Path("/path/to/file")]["slot1"]
-        == np.array(
-            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
-        )
-    ).all()
+
+    assert_metadata_matches(metadata, expected_metadata, "/path/to/file", "slot1")
 
 
-def test__get_remote_medical_file_transform_requirements_mixed():
+def test__get_remote_file_medical_metadata_mixed(base_medical_metadata):
     """Test mixed case with both MONAI and legacy NifTI files"""
-    mock_file1 = MagicMock(spec=DatasetItem)
-    mock_file1.slots = [
+    # MONAI file
+    monai_metadata = {**base_medical_metadata}
+    monai_metadata.update(
         {
-            "slot_name": "slot1",
-            "metadata": {
-                "medical": {
-                    "handler": "MONAI",
-                    "plane_map": {"slot1": "AXIAL"},
-                    "pixdims": [1.0, 2.0, 3.0],
-                }
-            },
+            "handler": "MONAI",
+            "plane_map": {"slot1": "AXIAL"},
         }
-    ]
-    mock_file1.full_path = "/path/to/file1"
-
-    mock_file2 = MagicMock(spec=DatasetItem)
-    mock_file2.slots = [
-        {
-            "slot_name": "slot2",
-            "metadata": {
-                "medical": {
-                    "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-                    "pixdims": [1.0, 2.0, 3.0],
-                    "plane_map": {"slot2": "AXIAL"},
-                }
-            },
-        }
-    ]
-    mock_file2.full_path = "/path/to/file2"
-
-    remote_files: List[DatasetItem] = [mock_file1, mock_file2]
-    legacy_scaling, pixdims_and_primary_planes = (
-        _get_remote_medical_file_transform_requirements(remote_files)
     )
+    mock_file1 = create_mock_file("slot1", monai_metadata, "/path/to/file1")
 
-    assert pixdims_and_primary_planes == {
-        Path("/path/to/file1"): {"slot1": ([1.0, 2.0, 3.0], "AXIAL")},
-        Path("/path/to/file2"): {"slot2": ([1.0, 2.0, 3.0], "AXIAL")},
+    # Legacy NifTI file
+    legacy_metadata = {**base_medical_metadata}
+    legacy_metadata.update(
+        {
+            "plane_map": {"slot2": "AXIAL"},
+        }
+    )
+    mock_file2 = create_mock_file("slot2", legacy_metadata, "/path/to/file2")
+
+    metadata = _get_remote_file_medical_metadata([mock_file1, mock_file2])
+
+    expected_metadata = {
+        Path("/path/to/file1"): {
+            "slot1": {
+                "legacy": False,
+                "affine": np.array(base_medical_metadata["affine"], dtype=np.float64),
+                "original_affine": np.array(
+                    base_medical_metadata["original_affine"], dtype=np.float64
+                ),
+                "pixdims": [1.0, 2.0, 3.0],
+                "width": 100,
+                "height": 100,
+                "primary_plane": "AXIAL",
+                "num_frames": 10,
+                "axial_flips": np.array([1, 1, 1]),
+            }
+        },
+        Path("/path/to/file2"): {
+            "slot2": {
+                "legacy": True,
+                "affine": np.array(base_medical_metadata["affine"], dtype=np.float64),
+                "original_affine": np.array(
+                    base_medical_metadata["original_affine"], dtype=np.float64
+                ),
+                "pixdims": [1.0, 2.0, 3.0],
+                "width": 100,
+                "height": 100,
+                "primary_plane": "AXIAL",
+                "num_frames": 10,
+                "axial_flips": np.array([1, 1, 1]),
+            }
+        },
     }
-    assert Path("/path/to/file2") in legacy_scaling
-    assert "slot2" in legacy_scaling[Path("/path/to/file2")]
-    assert legacy_scaling[Path("/path/to/file2")]["slot2"].shape == (4, 4)
-    assert (
-        legacy_scaling[Path("/path/to/file2")]["slot2"]
-        == np.array(
-            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float64
+
+    assert_metadata_matches(metadata, expected_metadata, "/path/to/file1", "slot1")
+    assert_metadata_matches(metadata, expected_metadata, "/path/to/file2", "slot2")
+
+
+def test__get_remote_file_medical_metadata_axial_flips(base_medical_metadata):
+    """Test different axial flip configurations"""
+    test_cases = [
+        (
+            "x_flip",
+            [[-1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            [-1, 1, 1],
+        ),
+        (
+            "y_flip",
+            [[1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+            [1, -1, 1],
+        ),
+        (
+            "z_flip",
+            [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]],
+            [1, 1, -1],
+        ),
+        (
+            "xyz_flip",
+            [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, -1, 0], [0, 0, 0, 1]],
+            [-1, -1, -1],
+        ),
+    ]
+
+    for name, original_affine, expected_flips in test_cases:
+        medical_metadata = {**base_medical_metadata}
+        medical_metadata.update(
+            {
+                "handler": "MONAI",
+                "plane_map": {"slot1": "AXIAL"},
+                "original_affine": original_affine,
+            }
         )
-    ).all()
+
+        mock_file = create_mock_file("slot1", medical_metadata)
+        metadata = _get_remote_file_medical_metadata([mock_file])
+
+        expected_metadata = {
+            Path("/path/to/file"): {
+                "slot1": {
+                    "legacy": False,
+                    "affine": np.array(
+                        base_medical_metadata["affine"], dtype=np.float64
+                    ),
+                    "original_affine": np.array(original_affine, dtype=np.float64),
+                    "pixdims": [1.0, 2.0, 3.0],
+                    "width": 100,
+                    "height": 100,
+                    "primary_plane": "AXIAL",
+                    "num_frames": 10,
+                    "axial_flips": np.array(expected_flips),
+                }
+            }
+        }
+
+        assert_metadata_matches(metadata, expected_metadata, "/path/to/file", "slot1")
 
 
 def test_slot_is_medical():
@@ -4058,3 +4070,60 @@ def test_slot_is_handled_by_monai():
     non_monai_slot = {"metadata": {"medical": {}}}
     assert slot_is_handled_by_monai(monai_slot) is True
     assert slot_is_handled_by_monai(non_monai_slot) is False
+
+
+@pytest.fixture
+def base_medical_metadata():
+    """Base medical metadata structure used across tests."""
+    return {
+        "height": 100,
+        "width": 100,
+        "pixdims": [1.0, 2.0, 3.0],
+        "affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+        "original_affine": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+    }
+
+
+def create_mock_file(
+    slot_name: str,
+    medical_metadata: Optional[dict] = None,
+    file_path: str = "/path/to/file",
+) -> Mock:
+    """Create a mock file with given medical metadata."""
+    mock_file = MagicMock(spec=DatasetItem)
+    mock_file.slots = [
+        {
+            "slot_name": slot_name,
+            "total_sections": 10,
+            "metadata": {"height": 100, "width": 100},
+        }
+    ]
+    if medical_metadata:
+        mock_file.slots[0]["metadata"]["medical"] = medical_metadata
+    mock_file.full_path = file_path
+    return mock_file
+
+
+def assert_metadata_matches(
+    metadata: dict, expected: dict, file_path: str, slot_name: str
+):
+    """Assert that metadata matches expected values."""
+    path = Path(file_path)
+    slot_metadata = metadata[path][slot_name]
+    expected_slot_metadata = expected[path][slot_name]
+
+    assert np.array_equal(slot_metadata["affine"], expected_slot_metadata["affine"])
+    assert np.array_equal(
+        slot_metadata["original_affine"], expected_slot_metadata["original_affine"]
+    )
+    assert np.array_equal(
+        slot_metadata["axial_flips"], expected_slot_metadata["axial_flips"]
+    )
+
+    # Assert scalar values
+    assert slot_metadata["primary_plane"] == expected_slot_metadata["primary_plane"]
+    assert slot_metadata["num_frames"] == expected_slot_metadata["num_frames"]
+    assert slot_metadata["width"] == expected_slot_metadata["width"]
+    assert slot_metadata["height"] == expected_slot_metadata["height"]
+    assert slot_metadata["legacy"] == expected_slot_metadata["legacy"]
+    assert slot_metadata["pixdims"] == expected_slot_metadata["pixdims"]
